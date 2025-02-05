@@ -33,6 +33,35 @@ rust_optimization_args: T.Dict[str, T.List[str]] = {
     's': ['-C', 'opt-level=s'],
 }
 
+def get_rustup_run_and_args(exelist: T.List[str]) -> T.Optional[T.Tuple[T.List[str], T.List[str]]]:
+    """Given the command for a rustc executable, check if it is invoked via
+       "rustup run" and if so separate the "rustup [OPTIONS] run TOOLCHAIN"
+       part from the arguments to rustc.  If the returned value is not None,
+       other tools (for example clippy-driver or rustdoc) can be run by placing
+       the name of the tool between the two elements of the tuple."""
+    e = iter(exelist)
+    try:
+        if os.path.basename(next(e)) != 'rustup':
+            return None
+        # minimum three strings: "rustup run TOOLCHAIN"
+        n = 3
+        opt = next(e)
+
+        # options come first
+        while opt.startswith('-'):
+            n += 1
+            opt = next(e)
+
+        # then "run TOOLCHAIN"
+        if opt != 'run':
+            return None
+
+        next(e)
+        next(e)
+        return exelist[:n], list(e)
+    except StopIteration:
+        return None
+
 class RustCompiler(Compiler):
 
     # rustc doesn't invoke the compiler itself, it doesn't need a LINKER_PREFIX
@@ -40,7 +69,7 @@ class RustCompiler(Compiler):
     id = 'rustc'
 
     _WARNING_LEVELS: T.Dict[str, T.List[str]] = {
-        '0': ['-A', 'warnings'],
+        '0': ['--cap-lints', 'allow'],
         '1': [],
         '2': [],
         '3': ['-W', 'warnings'],
@@ -65,6 +94,7 @@ class RustCompiler(Compiler):
         super().__init__([], exelist, version, for_machine, info,
                          is_cross=is_cross, full_version=full_version,
                          linker=linker)
+        self.rustup_run_and_args: T.Optional[T.Tuple[T.List[str], T.List[str]]] = get_rustup_run_and_args(exelist)
         self.base_options.update({OptionKey(o) for o in ['b_colorout', 'b_ndebug']})
         if 'link' in self.linker.id:
             self.base_options.add(OptionKey('b_vscrt'))
@@ -140,10 +170,20 @@ class RustCompiler(Compiler):
         self.native_static_libs = [i for i in match.group(1).split() if i not in exclude]
 
     def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
-        return ['--dep-info', outfile]
+        return ['--emit', f'dep-info={outfile}']
 
+    def get_output_args(self, outputname: str) -> T.List[str]:
+        return ['--emit', f'link={outputname}']
+
+    @functools.lru_cache(maxsize=None)
     def get_sysroot(self) -> str:
         cmd = self.get_exelist(ccache=False) + ['--print', 'sysroot']
+        p, stdo, stde = Popen_safe_logged(cmd)
+        return stdo.split('\n', maxsplit=1)[0]
+
+    @functools.lru_cache(maxsize=None)
+    def get_target_libdir(self) -> str:
+        cmd = self.get_exelist(ccache=False) + ['--print', 'target-libdir']
         p, stdo, stde = Popen_safe_logged(cmd)
         return stdo.split('\n', maxsplit=1)[0]
 
@@ -159,6 +199,20 @@ class RustCompiler(Compiler):
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return rust_optimization_args[optimization_level]
 
+    def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
+                         install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
+        args, to_remove = super().build_rpath_args(env, build_dir, from_dir, rpath_paths,
+                                                   build_rpath, install_rpath)
+
+        # ... but then add rustc's sysroot to account for rustup
+        # installations
+        rustc_rpath_args = []
+        for arg in args:
+            rustc_rpath_args.append('-C')
+            rustc_rpath_args.append(f'link-arg={arg}:{self.get_target_libdir()}')
+        return rustc_rpath_args, to_remove
+
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str],
                                                build_dir: str) -> T.List[str]:
         for idx, i in enumerate(parameter_list):
@@ -171,9 +225,6 @@ class RustCompiler(Compiler):
 
         return parameter_list
 
-    def get_output_args(self, outputname: str) -> T.List[str]:
-        return ['-o', outputname]
-
     @classmethod
     def use_linker_args(cls, linker: str, version: str) -> T.List[str]:
         return ['-C', f'linker={linker}']
@@ -183,11 +234,16 @@ class RustCompiler(Compiler):
     # use_linker_args method instead.
 
     def get_options(self) -> MutableKeyedOptionDictType:
-        return dict((self.create_option(options.UserComboOption,
-                                        self.form_compileropt_key('std'),
-                                        'Rust edition to use',
-                                        ['none', '2015', '2018', '2021'],
-                                        'none'),))
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('std')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'Rust edition to use',
+            'none',
+            choices=['none', '2015', '2018', '2021', '2024'])
+
+        return opts
 
     def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
         # Rust doesn't have dependency compile arguments so simply return
@@ -245,6 +301,25 @@ class RustCompiler(Compiler):
         action = "no" if disable else "yes"
         return ['-C', f'debug-assertions={action}', '-C', 'overflow-checks=no']
 
+    def get_rust_tool(self, name: str, env: Environment) -> T.List[str]:
+        if self.rustup_run_and_args:
+            rustup_exelist, args = self.rustup_run_and_args
+            # do not use extend so that exelist is copied
+            exelist = rustup_exelist + [name]
+        else:
+            exelist = [name]
+            args = self.exelist[1:]
+
+        from ..programs import find_external_program
+        for prog in find_external_program(env, self.for_machine, exelist[0], exelist[0],
+                                          [exelist[0]], allow_default_for_cross=False):
+            exelist[0] = prog.path
+            break
+        else:
+            return []
+
+        return exelist + args
+
 
 class ClippyRustCompiler(RustCompiler):
 
@@ -254,3 +329,21 @@ class ClippyRustCompiler(RustCompiler):
     """
 
     id = 'clippy-driver rustc'
+
+
+class RustdocTestCompiler(RustCompiler):
+
+    """We invoke Rustdoc to run doctests.  Some of the flags
+       are different from rustc and some (e.g. --emit link) are
+       ignored."""
+
+    id = 'rustdoc --test'
+
+    def get_debug_args(self, is_debug: bool) -> T.List[str]:
+        return []
+
+    def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
+        return []
+
+    def get_output_args(self, outputname: str) -> T.List[str]:
+        return []

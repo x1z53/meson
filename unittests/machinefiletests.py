@@ -23,7 +23,7 @@ import mesonbuild.envconfig
 import mesonbuild.environment
 import mesonbuild.coredata
 import mesonbuild.modules.gnome
-
+from mesonbuild import mesonlib
 from mesonbuild import machinefile
 
 from mesonbuild.mesonlib import (
@@ -275,7 +275,12 @@ class NativeFileTests(BasePlatformTests):
             if not is_real_gnu_compiler(shutil.which('gcc')):
                 raise SkipTest('Only one compiler found, cannot test.')
             return 'gcc', 'gcc'
-        self.helper_for_compiler('objc', cb)
+        try:
+            self.helper_for_compiler('objc', cb)
+        except mesonlib.EnvironmentException as e:
+            if 'GCC was not built with support for objective-c' in str(e):
+                raise unittest.SkipTest("GCC doesn't support objective-c, test cannot run")
+            raise
 
     @skip_if_not_language('objcpp')
     @skip_if_env_set('OBJCXX')
@@ -288,7 +293,12 @@ class NativeFileTests(BasePlatformTests):
             if not is_real_gnu_compiler(shutil.which('g++')):
                 raise SkipTest('Only one compiler found, cannot test.')
             return 'g++', 'gcc'
-        self.helper_for_compiler('objcpp', cb)
+        try:
+            self.helper_for_compiler('objcpp', cb)
+        except mesonlib.EnvironmentException as e:
+            if 'GCC was not built with support for objective-c++' in str(e):
+                raise unittest.SkipTest("G++ doesn't support objective-c++, test cannot run")
+            raise
 
     @skip_if_not_language('d')
     @skip_if_env_set('DC')
@@ -378,7 +388,7 @@ class NativeFileTests(BasePlatformTests):
     def test_java_classpath(self):
         if self.backend is not Backend.ninja:
             raise SkipTest('Jar is only supported with Ninja')
-        testdir = os.path.join(self.unit_test_dir, '112 classpath')
+        testdir = os.path.join(self.unit_test_dir, '113 classpath')
         self.init(testdir)
         self.build()
         one_build_path = get_classpath(os.path.join(self.builddir, 'one.jar'))

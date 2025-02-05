@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2022 The Meson development team
-# Copyright © 2023-2024 Intel Corporation
+# Copyright © 2023-2025 Intel Corporation
 
 from __future__ import annotations
 
@@ -20,9 +20,7 @@ from ..mesonlib import (
     EnvironmentException, MesonException,
     Popen_safe_logged, LibType, TemporaryDirectoryWinProof,
 )
-
 from ..options import OptionKey
-
 from ..arglist import CompilerArgs
 
 if T.TYPE_CHECKING:
@@ -37,8 +35,8 @@ if T.TYPE_CHECKING:
     from ..dependencies import Dependency
 
     CompilerType = T.TypeVar('CompilerType', bound='Compiler')
-    _T = T.TypeVar('_T')
-    UserOptionType = T.TypeVar('UserOptionType', bound=options.UserOption)
+
+_T = T.TypeVar('_T')
 
 """This file contains the data files of all compilers Meson knows
 about. To support a new compiler, add its information below.
@@ -69,6 +67,7 @@ lang_suffixes: T.Mapping[str, T.Tuple[str, ...]] = {
     'cython': ('pyx', ),
     'nasm': ('asm', 'nasm',),
     'masm': ('masm',),
+    'linearasm': ('sa',),
 }
 all_languages = lang_suffixes.keys()
 c_cpp_suffixes = {'h'}
@@ -133,11 +132,15 @@ def is_header(fname: 'mesonlib.FileOrString') -> bool:
 def is_source_suffix(suffix: str) -> bool:
     return suffix in source_suffixes
 
+@lru_cache(maxsize=None)
+def cached_is_source_by_name(fname: str) -> bool:
+    suffix = fname.split('.')[-1].lower()
+    return is_source_suffix(suffix)
+
 def is_source(fname: 'mesonlib.FileOrString') -> bool:
     if isinstance(fname, mesonlib.File):
         fname = fname.fname
-    suffix = fname.split('.')[-1].lower()
-    return is_source_suffix(suffix)
+    return cached_is_source_by_name(fname)
 
 def is_assembly(fname: 'mesonlib.FileOrString') -> bool:
     if isinstance(fname, mesonlib.File):
@@ -152,14 +155,14 @@ def is_llvm_ir(fname: 'mesonlib.FileOrString') -> bool:
     return suffix in llvm_ir_suffixes
 
 @lru_cache(maxsize=None)
-def cached_by_name(fname: 'mesonlib.FileOrString') -> bool:
+def cached_is_object_by_name(fname: str) -> bool:
     suffix = fname.split('.')[-1]
     return suffix in obj_suffixes
 
 def is_object(fname: 'mesonlib.FileOrString') -> bool:
     if isinstance(fname, mesonlib.File):
         fname = fname.fname
-    return cached_by_name(fname)
+    return cached_is_object_by_name(fname)
 
 def is_library(fname: 'mesonlib.FileOrString') -> bool:
     if isinstance(fname, mesonlib.File):
@@ -211,23 +214,25 @@ clike_debug_args: T.Dict[bool, T.List[str]] = {
 
 MSCRT_VALS = ['none', 'md', 'mdd', 'mt', 'mtd']
 
+
 @dataclass
-class BaseOption(T.Generic[options._T, options._U]):
-    opt_type: T.Type[options._U]
+class BaseOption(T.Generic[_T]):
+    opt_type: T.Type[options.UserOption[_T]]
     description: str
     default: T.Any = None
     choices: T.Any = None
 
-    def init_option(self, name: OptionKey) -> options._U:
-        keywords = {'value': self.default}
+    def init_option(self, name: OptionKey) -> options.UserOption[_T]:
+        keywords = {}
         if self.choices:
             keywords['choices'] = self.choices
-        return self.opt_type(name.name, self.description, **keywords)
+        return self.opt_type(name.name, self.description, self.default, **keywords)
+
 
 BASE_OPTIONS: T.Mapping[OptionKey, BaseOption] = {
     OptionKey('b_pch'): BaseOption(options.UserBooleanOption, 'Use precompiled headers', True),
     OptionKey('b_lto'): BaseOption(options.UserBooleanOption, 'Use link time optimization', False),
-    OptionKey('b_lto_threads'): BaseOption(options.UserIntegerOption, 'Use multiple threads for Link Time Optimization', (None, None, 0)),
+    OptionKey('b_lto_threads'): BaseOption(options.UserIntegerOption, 'Use multiple threads for Link Time Optimization', 0),
     OptionKey('b_lto_mode'): BaseOption(options.UserComboOption, 'Select between different LTO modes.', 'default',
                                         choices=['default', 'thin']),
     OptionKey('b_thinlto_cache'): BaseOption(options.UserBooleanOption, 'Use LLVM ThinLTO caching for faster incremental builds', False),
@@ -428,8 +433,8 @@ class CompileResult(HoldableObject):
     output_name: T.Optional[str] = field(default=None, init=False)
     cached: bool = field(default=False, init=False)
 
-
 class Compiler(HoldableObject, metaclass=abc.ABCMeta):
+
     # Libraries to ignore in find_library() since they are provided by the
     # compiler or the C library. Currently only used for MSVC.
     ignore_libs: T.List[str] = []
@@ -582,11 +587,11 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         """
         return []
 
-    def create_option(self, option_type: T.Type[UserOptionType], option_key: OptionKey, *args: T.Any, **kwargs: T.Any) -> T.Tuple[OptionKey, UserOptionType]:
-        return option_key, option_type(f'{self.language}_{option_key.name}', *args, **kwargs)
+    def make_option_name(self, key: OptionKey) -> str:
+        return f'{self.language}_{key.name}'
 
     @staticmethod
-    def update_options(options: MutableKeyedOptionDictType, *args: T.Tuple[OptionKey, UserOptionType]) -> MutableKeyedOptionDictType:
+    def update_options(options: MutableKeyedOptionDictType, *args: T.Tuple[OptionKey, options.AnyOptionType]) -> MutableKeyedOptionDictType:
         options.update(args)
         return options
 
@@ -1323,8 +1328,12 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         # TODO: using a TypeDict here would improve this
         raise EnvironmentException(f'{self.id} does not implement get_feature_args')
 
-    def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.List[str]:
+    def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.Tuple[T.List[str], T.List[str]]:
         raise EnvironmentException(f'{self.id} does not know how to do prelinking.')
+
+    def get_prelink_append_compile_args(self) -> bool:
+        """Controls whether compile args have to be used for prelinking or not"""
+        return False
 
     def rsp_file_syntax(self) -> 'RSPFileSyntax':
         """The format of the RSP file that this compiler supports.
@@ -1349,6 +1358,15 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
     def form_compileropt_key(self, basename: str) -> OptionKey:
         return OptionKey(f'{self.language}_{basename}', machine=self.for_machine)
 
+    def _update_language_stds(self, opts: MutableKeyedOptionDictType, value: T.List[str]) -> None:
+        key = self.form_compileropt_key('std')
+        std = opts[key]
+        assert isinstance(std, (options.UserStdOption, options.UserComboOption)), 'for mypy'
+        if 'none' not in value:
+            value = ['none'] + value
+        std.choices = value
+
+
 def get_global_options(lang: str,
                        comp: T.Type[Compiler],
                        for_machine: MachineChoice,
@@ -1364,12 +1382,12 @@ def get_global_options(lang: str,
     comp_options = env.options.get(comp_key, [])
     link_options = env.options.get(largkey, [])
 
-    cargs = options.UserArrayOption(
+    cargs = options.UserStringArrayOption(
         f'{lang}_{argkey.name}',
         description + ' compiler',
         comp_options, split_args=True, allow_dups=True)
 
-    largs = options.UserArrayOption(
+    largs = options.UserStringArrayOption(
         f'{lang}_{largkey.name}',
         description + ' linker',
         link_options, split_args=True, allow_dups=True)

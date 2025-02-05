@@ -98,6 +98,8 @@ machine](#specifying-options-per-machine) section for details.
 | force_fallback_for                     | []            | Force fallback for those dependencies                          | no             | no                |
 | vsenv                                  | false         | Activate Visual Studio environment                             | no             | no                |
 
+(For the Rust language only, `warning_level=0` disables all warnings).
+
 #### Details for `backend`
 
 Several build file formats are supported as command runners to build the
@@ -181,11 +183,16 @@ fails.
 
 #### Details for `default_both_libraries`
 
-Since `1.6.0`, you can select the default type of library selected when using
-a `both_libraries` object. This can be either 'shared' (default value, compatible
-with previous meson versions), 'static', or 'auto'. With auto, the value from
-`default_library` option is used, unless it is 'both', in which case 'shared'
-is used instead.
+Since `1.6.0`, you can specify the default type of library selected when using a
+`both_libraries` object with `default_both_libraries`. Note that, unlike
+`default_library`, this option does not affect how the library artifacts are
+built, but how they are internally linked to the dependent targets within the
+same project.
+
+The possible values of this option are 'shared' (default value, compatible with
+previous meson versions), 'static', and 'auto'. With auto, the value from the
+`default_library` option is used, unless it is 'both', in which case 'shared' is
+used instead.
 
 When `default_both_libraries` is 'auto', passing a [[@both_libs]] dependency
 in [[both_libraries]] will link the static dependency with the static lib,
@@ -271,7 +278,7 @@ or compiler being used:
 | ------           | ------------- | ---------------                          | ----------- |
 | c_args           |               | free-form comma-separated list           | C compile arguments to use |
 | c_link_args      |               | free-form comma-separated list           | C link arguments to use |
-| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, c23, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x, gnu23 | C language standard to use |
+| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, c23, c2y, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x, gnu23, gnu2y | C language standard to use |
 | c_winlibs        | see below     | free-form comma-separated list           | Standard Windows libs to link against |
 | c_thread_count   | 4             | integer value ≥ 0                        | Number of threads to use with emcc when using threads |
 | cpp_args         |               | free-form comma-separated list           | C++ compile arguments to use |

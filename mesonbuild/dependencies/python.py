@@ -229,7 +229,10 @@ class _PythonDependencyBase(_Base):
                     elif imp_lower == 'pypy':
                         libpath = Path(f'libpypy{verdot}-c.dll')
                     else:
-                        libpath = Path(f'python{vernum}.dll')
+                        if self.is_freethreaded:
+                            libpath = Path(f'python{vernum}t.dll')
+                        else:
+                            libpath = Path(f'python{vernum}.dll')
                 else:
                     if self.is_freethreaded:
                         libpath = Path('libs') / f'python{vernum}t.lib'
@@ -324,6 +327,12 @@ class PythonPkgConfigDependency(PkgConfigDependency, _PythonDependencyBase):
         if not self.link_libpython and mesonlib.version_compare(self.version, '< 3.8'):
             self.link_args = []
 
+        # But not Apple, because it's a framework
+        if self.env.machines.host.is_darwin() and 'PYTHONFRAMEWORKPREFIX' in self.variables:
+            framework_prefix = self.variables['PYTHONFRAMEWORKPREFIX']
+            # Add rpath, will be de-duplicated if necessary
+            if framework_prefix.startswith('/Applications/Xcode.app/'):
+                self.link_args += ['-Wl,-rpath,' + framework_prefix]
 
 class PythonFrameworkDependency(ExtraFrameworkDependency, _PythonDependencyBase):
 
@@ -413,6 +422,9 @@ def python_factory(env: 'Environment', for_machine: 'MachineChoice',
                             del os.environ[name]
                     set_env('PKG_CONFIG_LIBDIR', old_pkg_libdir)
                     set_env('PKG_CONFIG_PATH', old_pkg_path)
+
+            # Otherwise this doesn't fulfill the interface requirements
+            wrap_in_pythons_pc_dir.log_tried = PythonPkgConfigDependency.log_tried  # type: ignore[attr-defined]
 
             candidates.append(functools.partial(wrap_in_pythons_pc_dir, pkg_name, env, kwargs, installation))
             # We only need to check both, if a python install has a LIBPC. It might point to the wrong location,
